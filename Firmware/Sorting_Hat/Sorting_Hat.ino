@@ -1,52 +1,6 @@
-//Based on "Player" example sketch for Lilypad MP3 Player by Mike Grusin, SparkFun Electronics
+// Based on "Trigger" example sketch for Lilypad MP3 Player
+// Mike Grusin, SparkFun Electronics
 // http://www.sparkfun.com
-
-
-// SOFTWARE
-
-// This sketch requires the following libraries. These are included
-// in the Lilypad MP3 Player firmware zip file and must be copied to
-// a "libraries" folder in your Arduino sketch directory:
-
-// Uses the SdFat library by William Greiman, which is supplied
-// with this archive, or download from http://code.google.com/p/sdfatlib/
-
-// Uses the SFEMP3Shield library by Porter and Flaga, which is supplied
-// with this archive, or download from http://www.billporter.info/
-
-// Uses the PinChangeInt library by Lex Talionis, which is supplied 
-// with this archive, or download from http://code.google.com/p/arduino-pinchangeint/
-
-// BASIC OPERATION:
-
-// Place your audio files in the root directory of the SD card.
-// Your files MUST have one of the following extensions: MP3, WAV,
-// MID (MIDI), MP4, WMA, AAC, FLA, OGG. Note that this is solely to
-// prevent the VS1053 from locking up from being fed non-audio data
-// (files without one of the above extensions are quietly skipped).
-// You can rename any playable file to any of the above extensions,
-// or add additional extensions to the isPlayable() function below.
-// See the VS1053 datasheet for the audio file types it can play.
-
-// The player has two modes, TRACK and VOLUME. In TRACK mode, turning
-// the knob will move to the next or previous track. In VOLUME mode,
-// turning the knob will increase or decrease the volume.
-
-// You can tell what mode you're in by the color of the RGB LED in the
-// knob of the rotary encoder. TRACK mode is red, VOLUME mode is green.
-
-// To switch between modes, hold down the button on the rotary encoder
-// until the color changes (more than one second).
-
-// To start and stop playback, press the button on the rotary encoder
-// *quickly* (less than one second). When the player is playing, it
-// will stubbornly keep playing; starting new tracks when the previous
-// one ends, and switching to new tracks if you turn the knob in TRACK
-// mode. When the player is stopped, it will not start playing until
-// you press the button *quickly*, but it will silently change tracks
-// or adjust the volume if you turn the knob.
-
-// SERIAL DEBUGGING
 
 // This sketch can output serial debugging information if desired
 // by changing the global variable "debugging" to true. Note that
@@ -55,6 +9,12 @@
 // trigger switches and use the serial port as long as the triggers
 // are normally open (not grounded) and remain ungrounded while the
 // serial port is in use.
+
+// Uses the SdFat library by William Greiman, which is supplied
+// with this archive, or download from http://code.google.com/p/sdfatlib/
+
+// Uses the SFEMP3Shield library by Bill Porter, which is supplied
+// with this archive, or download from http://www.billporter.info/
 
 // License:
 // We use the "beerware" license for our firmware. You can do
@@ -66,558 +26,254 @@
 // -your friends at SparkFun
 
 // Revision history:
-// 1.0 initial release MDG 2013/1/31
+// 1.0 initial release MDG 2012/11/01
+//Modified by Toni Klopfenstein 9/13
 
-// Required libraries:
+// We'll need a few libraries to access all this hardware!
 
-#include <SPI.h>
-#include <SdFat.h>
-#include <SdFatUtil.h>
-#include <SFEMP3Shield.h>
-#include <PinChangeInt.h>
+#include <SPI.h>            // To talk to the SD card and MP3 chip
+#include <SdFat.h>          // SD card file system
+#include <SFEMP3Shield.h>   // MP3 decoder chip
 
-// Set debugging to true to get serial messages:
+// Constants for the trigger input pins, which we'll place
+// in an array for convenience:
+
+int TRIG1 = A0;
+
+// And a few outputs we'll be using:
+
+const int EN_GPIO1 = A2; // Amp enable + MIDI/MP3 mode select
+const int SD_CS = 9;     // Chip Select for SD card
+
+// Create library objects:
+
+SFEMP3Shield MP3player;
+SdFat sd;
+
+// Set debugging = true if you'd like status messages sent 
+// to the serial port. Note that this will take over trigger
+// inputs 4 and 5. (You can leave triggers connected to 4 and 5
+// and still use the serial port, as long as you're careful to
+// NOT ground the triggers while you're using the serial port).
 
 boolean debugging = true;
 
-// Possible modes (first and last are there to make
-// rotating through them easier):
+// Set interrupt = false if you would like a triggered file to
+// play all the way to the end. If this is set to true, new
+// triggers will stop the playing file and start a new one.
 
-#define FIRST_MODE 0
-#define TRACK 0
+boolean interrupt = false;
 
-#define LAST_MODE 1
+// Set interruptself = true if you want the above rule to also
+// apply to the same trigger. In other words, if interrupt = true
+// and interruptself = false, subsequent triggers on the same
+// file will NOT start the file over. However, a different trigger
+// WILL stop the original file and start a new one.
 
-// Initial mode for the rotary encoder. TRACK lets you
-// select audio tracks, VOLUME lets you change the volume.
-// In any mode, a quick press will start and stop playback.
-// A longer press will switch to the next mode.
+boolean interruptself = true;
 
-unsigned char rotary_mode = TRACK;
+// We'll store the five filenames as arrays of characters.
+// "Short" (8.3) filenames are used, followed by a null character.
 
-// Initial volume for the MP3 chip. 0 is the loudest, 255
-// is the lowest.
-
-unsigned char volume = 0;
-
-// Start up *not* playing:
-
-boolean playing = false;
-
-// Set loop_all to true if you would like to automatically
-// start playing the next file after the current one ends:
-
-boolean loop_all = true;
-
-// LilyPad MP3 pin definitions:
-
-#define TRIG1 A0
-#define ROT_LEDG A1
-#define SHDN_GPIO1 A2
-#define ROT_B A3
-#define TRIG2_SDA A4
-#define TRIG3_SCL A5
-#define RIGHT A6
-#define LEFT A7
-
-#define TRIG5_RXI 0
-#define TRIG4_TXO 1
-#define MP3_DREQ 2
-#define ROT_SW 4
-#define ROT_LEDB 5
-#define MP3_CS 6
-#define MP3_DCS 7
-#define MP3_RST 8
-#define SD_CS 9
-#define ROT_LEDR 10
-#define MOSI 11
-#define MISO 12
-#define SCK 13
-
-// RGB LED colors (for common anode LED, 0 is on, 1 is off)
-
-#define OFF B111
-#define RED B110
-#define GREEN B101
-#define YELLOW B100
-#define BLUE B011
-#define PURPLE B010
-#define CYAN B001
-#define WHITE B000
-
-// Global variables and flags for interrupt request functions:
-
-
-volatile boolean button_pressed = false; // Will turn true if the button has been pushed
-volatile boolean button_released = false; // Will turn true if the button has been released (sets button_downtime)
-volatile unsigned long button_downtime = 0L; // ms the button was pushed before release
-char track[13];
-
-// Library objects:
-
-SdFat sd;
-SdFile file;
-SFEMP3Shield MP3player;
+char filename[5][13];
 
 
 void setup()
 {
+  int x, index;
+  SdFile file;
   byte result;
+  char tempfilename[13];
 
+//Set trigger as an input for flexiforce resistor
+    pinMode(A0,INPUT);
+
+  // The board uses a single I/O pin to select the
+  // mode the MP3 chip will start up in (MP3 or MIDI),
+  // and to enable/disable the amplifier chip:
+  
+  pinMode(EN_GPIO1,OUTPUT);
+  digitalWrite(EN_GPIO1,LOW);  // MP3 mode / amp off
+
+
+  // If debugging is true, initialize the serial port:
+  // (The 'F' stores constant strings in flash memory to save RAM)
+  
   if (debugging)
   {
     Serial.begin(9600);
-    Serial.println(F("Lilypad MP3 Player"));
-
-    // ('F' places constant strings in program flash to save RAM)
-
-    Serial.print(F("Free RAM = "));
-    Serial.println(FreeRam(), DEC);
+    Serial.println(F("Lilypad MP3 Player trigger sketch"));
   }
+  
+  // Initialize the SD card; SS = pin 9, half speed at first
 
-  // Set up I/O pins:
+  if (debugging) Serial.print(F("initialize SD card... "));
 
-  pinMode(TRIG1, INPUT);
-  digitalWrite(TRIG1, HIGH); // turn on weak pullup
-  pinMode(MP3_CS, OUTPUT);
-  pinMode(SHDN_GPIO1, OUTPUT);
-  pinMode(ROT_B, INPUT);
-  pinMode(TRIG2_SDA, INPUT);
-  digitalWrite(TRIG1, HIGH); // turn on weak pullup
-  pinMode(TRIG3_SCL, INPUT);
-  digitalWrite(TRIG1, HIGH); // turn on weak pullup
-  pinMode(TRIG5_RXI, INPUT);
-  digitalWrite(TRIG5_RXI, HIGH); // turn on weak pullup
-  pinMode(TRIG4_TXO, INPUT);
-  digitalWrite(TRIG4_TXO, HIGH); // turn on weak pullup
-  pinMode(ROT_SW, INPUT);
-  // switch is common anode with external pulldown, do not turn on pullup
-  pinMode(MP3_DREQ, INPUT);
-  pinMode(ROT_LEDB, OUTPUT);
-  pinMode(ROT_LEDG, OUTPUT);
-  pinMode(MP3_DCS, OUTPUT);
-  pinMode(MP3_RST, OUTPUT);
-  pinMode(ROT_LEDR, OUTPUT);
-  pinMode(SD_CS, OUTPUT);
-  pinMode(MOSI, OUTPUT);
-  pinMode(MISO, INPUT);
-  pinMode(SCK, OUTPUT);
-
- // Turn off amplifier chip / turn on MP3 mode:
-
-  digitalWrite(SHDN_GPIO1, LOW);
-  setLEDcolor(OFF);
-
-  // Initialize the SD card:
-
-  if (debugging) Serial.println(F("Initializing SD card... "));
-
-  result = sd.begin(SD_SEL, SPI_HALF_SPEED);
-
-  if (result != 1)
+  result = sd.begin(SD_CS, SPI_HALF_SPEED); // 1 for success
+  
+  if (result != 1) // Problem initializing the SD card
   {
-    if (debugging) Serial.println(F("error, halting"));
-    errorBlink(1,RED);
+    if (debugging) Serial.print(F("error, halting"));
+    
   }
-  else 
-    if (debugging) Serial.println(F("OK"));
- 
-  //Initialize the MP3 chip:
+  else
+    if (debugging) Serial.println(F("success!"));
   
-  if (debugging) Serial.println(F("Initializing MP3 chip... "));
+  // Start up the MP3 library
 
-  result = MP3player.begin();
+  if (debugging) Serial.print(F("initialize MP3 chip... "));
 
-  // Check result, 0 and 6 are OK:
-  
-  if((result != 0) && (result != 6))
+  result = MP3player.begin(); // 0 or 6 for success
+
+  // Check the result, see the library readme for error codes.
+
+  if ((result != 0) && (result != 6)) // Problem starting up
   {
     if (debugging)
     {
-      Serial.print(F("error "));
-      Serial.println(result);
+      Serial.print(F("error code "));
+      Serial.print(result);
+      Serial.print(F(", halting."));
     }
-    errorBlink(result,BLUE);
   }
   else
-    if (debugging) Serial.println(F("OK"));
-  
-  // Set up interrupts. We'll use the standard external interrupt
-  // pin for the rotary, but we'll use the pin change interrupt
-  // library for the button:
+    if (debugging) Serial.println(F("success!"));
 
-  attachInterrupt(1,rotaryIRQ,CHANGE);
-  PCintPort::attachInterrupt(ROT_SW, &buttonIRQ, CHANGE);
+  // Now we'll access the SD card to look for any (audio) files
+  // starting with the characters '1' to '5':
 
-  // Get initial track:
-  
-  sd.chdir("/",true); // Index beginning of root directory
-  getNextTrack();
-  if (debugging)
+  if (debugging) Serial.println(F("reading root directory"));
+
+  // Start at the first file in root and step through all of them:
+
+  sd.chdir("/",true);
+  while (file.openNext(sd.vwd(),O_READ))
   {
-    Serial.print(F("current track: "));
-    Serial.println(track);
+    // get filename
+
+    file.getFilename(tempfilename);
+
+    // Does the filename start with char '1' through '5'?      
+
+    if (tempfilename[0] >= '1' && tempfilename[0] <= '5')
+    {
+      // Yes! subtract char '1' to get an index of 0 through 4.
+
+      index = tempfilename[0] - '1';
+      
+      // Copy the data to our filename array.
+
+      strcpy(filename[index],tempfilename);
+  
+      if (debugging) // Print out file number and name
+      {
+        Serial.print(F("found a file with a leading "));
+        Serial.print(index+1);
+        Serial.print(F(": "));
+        Serial.println(filename[index]);
+      }
+    }
+    else
+      if (debugging)
+      {
+        Serial.print(F("found a file w/o a leading number: "));
+        Serial.println(tempfilename);
+      }
+      
+    file.close();
   }
-  
-  // Set initial volume (same for both left and right channels)
-  
-  MP3player.setVolume(volume, volume);
-  
-  // Initial mode for the rotary encoder
 
-  LEDmode(rotary_mode);
+  if (debugging)
+    Serial.println(F("done reading root directory"));
   
-  // Uncomment to get a directory listing of the SD card:
-  // sd.ls(LS_R | LS_DATE | LS_SIZE);
+  if (debugging) // List all the files we saved:
+  {
+    for(x = 0; x <= 4; x++)
+    {
+      Serial.print(F("trigger "));
+      Serial.print(x+1);
+      Serial.print(F(": "));
+      Serial.println(filename[x]);
+    }
+  }
 
-  // Turn on amplifier chip:
+  // Set the VS1053 volume. 0 is loudest, 255 is lowest (off):
+
+  MP3player.setVolume(10,10);
   
-  digitalWrite(SHDN_GPIO1, HIGH);
+  // Turn on the amplifier chip:
+  
+  digitalWrite(EN_GPIO1,HIGH);
   delay(2);
 }
 
 
-void buttonIRQ()
-{
-  // Button press interrupt request function (IRQ).
-  // This function is called *automatically* when the button
-  // changes state.
-
-  // Process rotary encoder button presses and releases, including
-  // debouncing (extra "presses" from noisy switch contacts).
-
-  // If button is pressed, the button_pressed flag is set to true.
-  // (Manually set this to false after handling the change.)
-
-  // If button is released, the button_released flag is set to true,
-  // and button_downtime will contain the duration of the button
-  // press in ms. (Set this to false after handling the change.)
-
-  // Raw information from PinChangeInt library:
-  
-  // Serial.print("pin: ");
-  // Serial.print(PCintPort::arduinoPin);
-  // Serial.print(" state: ");
-  // Serial.println(PCintPort::pinState);
-  
-  static boolean button_state = false;
-  static unsigned long start, end;
-    
-  if ((PCintPort::pinState == HIGH) && (button_state == false)) 
-  // Button was up, but is currently being pressed down
-  {
-    // Discard button presses too close together (debounce)
-    start = millis();
-    if (start > (end + 10)) // 10ms debounce timer
-    {
-      button_state = true;
-      button_pressed = true;
-    }
-  }
-  else if ((PCintPort::pinState == LOW) && (button_state == true))
-  // Button was down, but has just been released
-  {
-    // Discard button releases too close together (debounce)
-    end = millis();
-    if (end > (start + 10)) // 10ms debounce timer
-    {
-      button_state = false;
-      button_released = true;
-      button_downtime = end - start;
-    }
-  }
-}
-
-
-
-
 void loop()
 {
-  // "Static" variables are initalized once the first time
-  // the loop runs, but they keep their values through
-  // successive loops.
+  int t;   //current trigger
+  int x;
+  byte result;
   
-  static boolean button_down = false;
-  static unsigned long int button_down_start, button_down_time;
+  // Read the input on analog pin 0:
+  int sensorValue = analogRead(A0);
   
-
-
-  // The button IRQ also sets several flags to true, one for
-  // button_pressed, one for button_released. Like the rotary
-  // flag, we'll clear these when we're done handling them:
-
-  if (button_pressed)
-  {
-    if (debugging) Serial.println(F("button press"));
-
-    button_pressed = false; // Clear flag
-
-    // We'll set another flag saying the button is now down
-    // this is so we can keep track of how long the button
-    // is being held down. (We can't do this in interrupts,
-    // because the button state doesn't change while it's
-    // being held down):
-
-    button_down = true;
-    button_down_start = millis();
+  // Print out the value you read:
+  Serial.print("Flexiforce analog output: ");
+  Serial.println(sensorValue);
+  
+  //Divide analog range into 4 groups for trigger assignment 
+  if (sensorValue >= 0 && sensorValue <255){
+    t = 1;
   }
-
-  if (button_released)
-  {
-    if (debugging)
-    {
-      Serial.print(F("button release, downtime: "));
-      Serial.println(button_downtime,DEC);
-    }
-    
-    // For quick button presses, start or stop playback:
-    
-    if (button_downtime < 1000)
-    {
-      playing = !playing;
-      if (playing)
-        startPlaying();
-      else
-        stopPlaying();
-    }
-
-    button_released = false; // Clear flags
-    button_down = false;
+  else if (sensorValue >=256 && sensorValue <511){
+    t =  2;
   }
-
-  // Now we can keep track of how long the button is being
-  // held down, and perform actions based on that time.
-  // This lets us implement the "hold down for one second
-  // to change mode" action:
-
-  if (button_down)
-  {
-    button_down_time = millis() - button_down_start;
-
-    if (button_down_time > 1000)
-    {
-      // Switch to next mode
-
-      rotary_mode++;
-
-      // Loop around if necessary
-
-      if (rotary_mode > LAST_MODE) rotary_mode = FIRST_MODE;
-
-      // Set LED to mode color
-
-      LEDmode(rotary_mode);
-
-      if (debugging)
+  else if (sensorValue >=512 && sensorValue < 767){
+    t = 3;
+  }
+  else if (sensorValue >=768 && sensorValue <=1023){
+    t = 4;
+  }
+  else {
+    t = 5;
+  } 
+  
+   if (debugging)
       {
-        Serial.print(F("mode "));
-        Serial.println(rotary_mode);
+        Serial.print(F("got trigger "));
+        Serial.println(t);
       }
       
-      // Reset counter so holding the button will continue
-      // switching through modes:
-      
-      button_down_start = millis();
+      // Do we have a valid filename for this trigger?
+      // (Invalid filenames will have 0 as the first character)
+
+      if (filename[t-1][0] == 0)
+      {
+        if (debugging)
+          Serial.println(F("no file with that number"));
+      }
+      else // We do have a filename for this trigger!
+      {
+        // Play the filename associated with the trigger number.
+        // (If a file is already playing, this command will fail
+        //  with error #2).
+
+        result = MP3player.playMP3(filename[t-1]);
+
+        if(debugging)
+        {
+          if(result != 0)
+          {
+            Serial.print(F("error "));
+            Serial.print(result);
+            Serial.print(F(" when trying to play track "));
+          }
+          else
+          {
+            Serial.print(F("playing "));
+          }
+          Serial.println(filename[t-1]);
+        }
+      }
     }
-  }
-  
-  // Handle "last track ended" situations
-  // (should we play the next track?)
-  
-  // Are we in "playing" mode, and has the
-  // current file ended?
-  
-  if (playing && !MP3player.isPlaying())
-  {
-    getNextTrack(); // Set up for next track
-    
-    // If loop_all is true, start the next track
-    
-    if (loop_all)
-    {
-      startPlaying();
-    }
-    else
-      playing = false;
-  }
-}
 
-
-void getNextTrack()
-{
-  // Get the next playable track (check extension to be
-  // sure it's an audio file)
-  
-  do
-    getNextFile();
-  while(isPlayable() != true);
-}
-
-
-void getPrevTrack()
-{
-  // Get the previous playable track (check extension to be
-  // sure it's an audio file)
-
-  do
-    getPrevFile();
-  while(isPlayable() != true);
-}
-
-
-void getNextFile()
-{
-  // Get the next file (which may be playable or not)
-
-  int result = (file.openNext(sd.vwd(), O_READ));
-
-  // If we're at the end of the directory,
-  // loop around to the beginning:
-  
-  if (!result)
-  {
-    sd.chdir("/",true);
-    getNextTrack();
-    return;
-  }
-  file.getFilename(track);  
-  file.close();
-}
-
-
-void getPrevFile()
-{
-  // Get the previous file (which may be playable or not)
-  
-  char test[13], prev[13];
-
-  // Getting the previous file is tricky, since you can
-  // only go forward when reading directories.
-
-  // To handle this, we'll save the name of the current
-  // file, then keep reading all the files until we loop
-  // back around to where we are. While doing this we're
-  // saving the last file we looked at, so when we get
-  // back to the current file, we'll return the previous
-  // one.
-  
-  // Yeah, it's a pain.
-
-  strcpy(test,track);
-
-  do
-  {
-    strcpy(prev,track);
-    getNextTrack();
-  }
-  while(strcasecmp(track,test) != 0);
-  
-  strcpy(track,prev);
-}
-
-
-void startPlaying()
-{
-  int result;
-  
-  if (debugging)
-  {
-    Serial.print(F("playing "));
-    Serial.print(track);
-    Serial.print(F("..."));
-  }  
-
-  result = MP3player.playMP3(track);
-
-  if (debugging)
-  {
-    Serial.print(F(" result "));
-    Serial.println(result);  
-  }
-}
-
-
-void stopPlaying()
-{
-  if (debugging) Serial.println(F("stopping playback"));
-  MP3player.stopTrack();
-}
-
-
-boolean isPlayable()
-{
-  // Check to see if a filename has a "playable" extension.
-  // This is to keep the VS1053 from locking up if it is sent
-  // unplayable data.
-
-  char *extension;
-  
-  extension = strrchr(track,'.');
-  extension++;
-  if (
-    (strcasecmp(extension,"MP3") == 0) ||
-    (strcasecmp(extension,"WAV") == 0) ||
-    (strcasecmp(extension,"MID") == 0) ||
-    (strcasecmp(extension,"MP4") == 0) ||
-    (strcasecmp(extension,"WMA") == 0) ||
-    (strcasecmp(extension,"FLA") == 0) ||
-    (strcasecmp(extension,"OGG") == 0) ||
-    (strcasecmp(extension,"AAC") == 0)
-  )
-    return true;
-  else
-    return false;
-}
-
-
-void LEDmode(unsigned char mode)
-{
-  // Change the RGB LED to a specific color for each mode
-  // (See #defines at start of sketch for colors.)
-
-  switch (mode)
-  {
-    case TRACK:
-      setLEDcolor(RED);
-      break;
-
-      break;
-    default:
-      setLEDcolor(OFF);
-  }
-}
-
-
-void setLEDcolor(unsigned char color)
-{
-  // Set the RGB LED in the (optional) rotary encoder
-  // to a specific color. See the color #defines at the
-  // start of this sketch.
-
-  digitalWrite(ROT_LEDR,color & B001);
-  digitalWrite(ROT_LEDG,color & B010);
-  digitalWrite(ROT_LEDB,color & B100);  
-}
-
-
-void errorBlink(int blinks, byte color)
-{
-  // This function will blink the RGB LED in the rotary encoder
-  // (optional) a given number of times and repeat forever.
-  // This is so you can see error codes without having to use
-  // the serial monitor window.
-
-  int x;
-
-  while(true) // Loop forever
-  {
-    for (x=0; x < blinks; x++) // Blink a given number of times
-    {
-      setLEDcolor(color);
-      delay(250);
-      setLEDcolor(OFF);
-      delay(250);
-    }
-    delay(1500); // Longer pause between blink-groups
-  }
-}
